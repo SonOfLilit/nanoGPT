@@ -247,7 +247,7 @@ class FullBlock(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 1024
-    context_sizes: tuple[int] = (4, 8, 16)
+    context_sizes: tuple = (4, 8, 16)
     vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     n_layer: int = 12
     n_head: int = 12
