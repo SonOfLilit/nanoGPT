@@ -77,7 +77,7 @@ class CausalSelfAttention(nn.Module):
         v = sliding_windows(v, W)
         assert q.shape == (B, H, T, E)
         assert k.shape == (B, H, T, W, E)
-        att = torch.einsum('bhie,bhice->bhic', q, k) * (E ** -0.5)
+        att = torch.einsum('bhie,bhiwe->bhiw', q, k) * (E ** -0.5)
         assert att.shape == (B, H, T, W)
         att = F.softmax(att, dim=-1)
         assert att.shape == (B, H, T, W)
@@ -99,7 +99,7 @@ class ShrinkCausalSelfAttention(nn.Module):
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
         assert config.n_embd % 2 == 0
-        self.c_attn = nn.Linear(config.n_embd, config.n_embd * 5 // 2, bias=config.bias)
+        self.c_attn = nn.Linear(config.n_embd, config.n_embd * 3, bias=config.bias)
         # output projection
         self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
         # regularization
@@ -114,13 +114,14 @@ class ShrinkCausalSelfAttention(nn.Module):
         B, T, C = x.size() # batch size, sequence length, embedding dimensionality (n_embd)
 
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
-        q, k ,v  = self.c_attn(x).split((self.n_embd // 2, self.n_embd, self.n_embd), dim=2)
+        q, k ,v  = self.c_attn(x).split(self.n_embd, dim=2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.resize(B, T // 2, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T/2, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
+        q = q[:, :, 1::2]
         _B, H, _T, E = q.shape
-        assert k.shape == v.shape == (B, H, T, E), (k.shape, v.shape, (B, H, T // 2, E))
+        assert k.shape == v.shape == (B, H, T, E), (k.shape, v.shape, (B, H, T, E))
         assert (_B, _T) == (B, T // 2)
         T = _T
         assert C == H * E
@@ -130,7 +131,7 @@ class ShrinkCausalSelfAttention(nn.Module):
         v = sliding_windows(v, W)[:, :, 1::2]
         assert q.shape == (B, H, T, E)
         assert k.shape == (B, H, T, W, E)
-        att = torch.einsum('bhie,bhice->bhic', q, k) * (E ** -0.5)
+        att = torch.einsum('bhie,bhiwe->bhiw', q, k) * (E ** -0.5)
         assert att.shape == (B, H, T, W)
         att = F.softmax(att, dim=-1)
         assert att.shape == (B, H, T, W)
@@ -169,32 +170,30 @@ class GrowCausalSelfAttention(nn.Module):
         # calculate query, key, values for all heads in batch and move head forward to be the batch dim
         q, k ,v  = self.c_attn(x).split((self.n_embd * 2, self.n_embd, self.n_embd), dim=2)
         k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
-        q = q.resize(B, 2 * T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, 2 * T, hs)
+        q = q.view(B, T, self.n_head, 2, C // self.n_head).transpose(1, 2) # (B, nh, T, 2, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
-        _B, H, _T, E = q.shape
+        _B, H, _T, G, E = q.shape
+        assert G == 2
         assert k.shape == v.shape == (B, H, T, E)
-        assert (_B, _T) == (B, 2 * T)
-        T = _T
+        assert (_B, _T) == (B, T)
         assert C == H * E
         # fixed-context causal self-attention
         W = self.context_size
         k = sliding_windows(k, W)
         v = sliding_windows(v, W)
-        k = torch.repeat_interleave(k, repeats=2, dim=2)
-        v = torch.repeat_interleave(v, repeats=2, dim=2)
-        assert q.shape == (B, H, T, E)
+        assert q.shape == (B, H, T, 2, E)
         assert k.shape == (B, H, T, W, E)
-        att = torch.einsum('bhie,bhice->bhic', q, k) * (E ** -0.5)
-        assert att.shape == (B, H, T, W)
+        att = torch.einsum('bhige,bhiwe->bhigw', q, k) * (E ** -0.5)
+        assert att.shape == (B, H, T, 2, W)
         att = F.softmax(att, dim=-1)
-        assert att.shape == (B, H, T, W)
+        assert att.shape == (B, H, T, 2, W)
         att = self.attn_dropout(att)
-        assert att.shape == (B, H, T, W)
+        assert att.shape == (B, H, T, 2, W)
         assert v.shape == (B, H, T, W, E)
-        y = (att.unsqueeze(-2) @ v).squeeze(-2)
-        assert y.shape == (B, H, T, E), y.shape
-        y = y.transpose(1, 2).contiguous().view(B, T, C) # re-assemble all head outputs side by side
+        y = (att @ v)
+        assert y.shape == (B, H, T, 2, E), y.shape
+        y = y.transpose(1, 2).contiguous().view(B, 2 * T, C) # re-assemble all head outputs side by side
 
         # output projection
         y = self.resid_dropout(self.c_proj(y))
@@ -265,8 +264,8 @@ class GPT(nn.Module):
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            shrink = nn.ModuleList([ShrinkBlock(config) for _ in range(config.n_layer // 2)]),
-            grow = nn.ModuleList([GrowBlock(config) for i in range(config.n_layer // 2)]),
+            shrink = nn.ModuleList([Block(config) if i % 2 == 0 else ShrinkBlock(config) for i in range(config.n_layer // 2)]),
+            grow = nn.ModuleList([GrowBlock(config) if i % 2 == 0 else Block(config) for i in range(config.n_layer // 2)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)

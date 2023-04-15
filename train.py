@@ -233,6 +233,7 @@ def get_lr(it):
 if wandb_log and master_process:
     import wandb
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
+    wandb.run.log_code(".", include_fn=lambda path: path.endswith("train.py") or path.endswith("model.py"))
 
 # training loop
 X, Y = get_batch('train') # fetch the very first batch
