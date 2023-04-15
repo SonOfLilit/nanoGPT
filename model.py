@@ -224,8 +224,11 @@ class Block(nn.Module):
         self.mlp = MLP(config)
 
     def forward(self, x, residual):
-        x = self.attn(self.ln_1(x))
+        if x.shape[1] > 0:
+            x = self.attn(self.ln_1(x))
         if residual is not None:
+            if residual.shape[1] > x.shape[1]:
+                x = F.pad(x, (0, 0, residual.shape[1] - x.shape[1], 0))
             x = residual + x
         x = x + self.mlp(self.ln_2(x))
         return x
