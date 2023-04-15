@@ -43,7 +43,7 @@ def sliding_windows(x, context_size):
 
 class CausalSelfAttention(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, context_size):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
@@ -55,7 +55,7 @@ class CausalSelfAttention(nn.Module):
         self.resid_dropout = nn.Dropout(config.dropout)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
-        self.context_size = config.context_size
+        self.context_size = context_size
         self.dropout = config.dropout
 
     def forward(self, x):
@@ -94,7 +94,7 @@ class CausalSelfAttention(nn.Module):
 
 class ShrinkCausalSelfAttention(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, context_size):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
@@ -107,7 +107,7 @@ class ShrinkCausalSelfAttention(nn.Module):
         self.resid_dropout = nn.Dropout(config.dropout)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
-        self.context_size = config.context_size
+        self.context_size = context_size
         self.dropout = config.dropout
 
     def forward(self, x):
@@ -148,7 +148,7 @@ class ShrinkCausalSelfAttention(nn.Module):
 
 class GrowCausalSelfAttention(nn.Module):
 
-    def __init__(self, config):
+    def __init__(self, config, context_size):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
@@ -161,7 +161,7 @@ class GrowCausalSelfAttention(nn.Module):
         self.resid_dropout = nn.Dropout(config.dropout)
         self.n_head = config.n_head
         self.n_embd = config.n_embd
-        self.context_size = config.context_size
+        self.context_size = context_size
         self.dropout = config.dropout
 
     def forward(self, x):
@@ -216,10 +216,10 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-    def __init__(self, config, attention=CausalSelfAttention):
+    def __init__(self, config, context_size, attention=CausalSelfAttention):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = attention(config)
+        self.attn = attention(config, context_size=context_size)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
@@ -234,10 +234,10 @@ class Block(nn.Module):
         return x
 
 class FullBlock(nn.Module):
-    def __init__(self, config, attention):
+    def __init__(self, config, context_size, attention: type):
         super().__init__()
-        self.same_size_block = Block(config)
-        self.shrink_grow_block = Block(config, attention=attention)
+        self.same_size_block = Block(config, context_size=context_size)
+        self.shrink_grow_block = Block(config, context_size=context_size, attention=attention)
 
     def forward(self, x, residual):
         x = self.same_size_block(x, x)
@@ -247,7 +247,7 @@ class FullBlock(nn.Module):
 @dataclass
 class GPTConfig:
     block_size: int = 1024
-    context_size: int = 16
+    context_sizes: tuple[int] = (4, 8, 16)
     vocab_size: int = 50304 # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
     n_layer: int = 12
     n_head: int = 12
@@ -264,12 +264,13 @@ class GPT(nn.Module):
         self.config = config
 
         assert config.n_layer % 4 == 0
+        assert config.n_layer // 4 == len(config.context_sizes)
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            shrink = nn.ModuleList([FullBlock(config, attention=ShrinkCausalSelfAttention) for _ in range(config.n_layer // 4)]),
-            grow = nn.ModuleList([FullBlock(config, attention=GrowCausalSelfAttention) for _ in range(config.n_layer // 4)]),
+            shrink = nn.ModuleList([FullBlock(config, context_size=c, attention=ShrinkCausalSelfAttention) for c in config.context_sizes]),
+            grow = nn.ModuleList([FullBlock(config, context_size=c, attention=GrowCausalSelfAttention) for c in reversed(config.context_sizes)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
