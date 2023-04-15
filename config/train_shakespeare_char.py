@@ -7,15 +7,15 @@ eval_iters = 200
 log_interval = 10 # don't print too too often
 
 # we expect to overfit on this small dataset, so only save when val improves
-always_save_checkpoint = True
+always_save_checkpoint = False
 
 wandb_log = False # override via command line if you like
 wandb_project = 'shakespeare-char'
 wandb_run_name = 'hourglass-fast'
 
 dataset = 'shakespeare_char'
-batch_size = 6
-block_size = 4096 # context of up to 256 previous characters
+batch_size = 6*16
+block_size = 256 # context of up to 256 previous characters
 
 # baby GPT model :)
 n_layer = 12
