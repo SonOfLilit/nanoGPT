@@ -216,14 +216,10 @@ class MLP(nn.Module):
         return x
 
 class Block(nn.Module):
-
-    Attention = CausalSelfAttention
-    SCALE = 1
-
-    def __init__(self, config):
+    def __init__(self, config, attention=CausalSelfAttention):
         super().__init__()
         self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
-        self.attn = self.Attention(config)
+        self.attn = attention(config)
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
@@ -234,11 +230,16 @@ class Block(nn.Module):
         x = x + self.mlp(self.ln_2(x))
         return x
 
-class ShrinkBlock(Block):
-    Attention = ShrinkCausalSelfAttention
+class FullBlock(nn.Module):
+    def __init__(self, config, attention):
+        super().__init__()
+        self.same_size_block = Block(config)
+        self.shrink_grow_block = Block(config, attention=attention)
 
-class GrowBlock(Block):
-    Attention = GrowCausalSelfAttention
+    def forward(self, x, residual):
+        x = self.same_size_block(x, x)
+        x = self.shrink_grow_block(x, residual)
+        return x
 
 @dataclass
 class GPTConfig:
@@ -259,13 +260,13 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
 
-        assert config.n_layer % 2 == 0
+        assert config.n_layer % 4 == 0
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
-            shrink = nn.ModuleList([Block(config) if i % 2 == 0 else ShrinkBlock(config) for i in range(config.n_layer // 2)]),
-            grow = nn.ModuleList([GrowBlock(config) if i % 2 == 0 else Block(config) for i in range(config.n_layer // 2)]),
+            shrink = nn.ModuleList([FullBlock(config, attention=ShrinkCausalSelfAttention) for _ in range(config.n_layer // 4)]),
+            grow = nn.ModuleList([FullBlock(config, attention=GrowCausalSelfAttention) for _ in range(config.n_layer // 4)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
