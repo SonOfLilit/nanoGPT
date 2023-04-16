@@ -36,8 +36,8 @@ class LayerNorm(nn.Module):
 
 def sliding_windows(x, context_size):
     B, H, T, E = x.shape
-    x = F.pad(x, (0, 0, 0, 0, context_size - 1, 0))
-    x = x.unfold(1, context_size, 1).transpose(-2, -1)
+    x = F.pad(x, (0, 0, context_size - 1, 0))
+    x = x.unfold(dimension=2, size=context_size, step=1).transpose(-2, -1)
     assert x.shape == (B, H, T, context_size, E), (x.shape, (B, H, T, context_size, E))
     return x
 
@@ -93,7 +93,6 @@ class CausalSelfAttention(nn.Module):
         return y
 
 class ShrinkCausalSelfAttention(nn.Module):
-
     def __init__(self, config, context_size):
         super().__init__()
         assert config.n_embd % config.n_head == 0
@@ -119,16 +118,16 @@ class ShrinkCausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2) # (B, nh, T, hs)
 
-        q = q[:, :, 1::2]
+        q = q[:, :, ::2]
         _B, H, _T, E = q.shape
         assert k.shape == v.shape == (B, H, T, E), (k.shape, v.shape, (B, H, T, E))
-        assert (_B, _T) == (B, T // 2)
+        assert (_B, _T) == (B, (T + 1) // 2)
         T = _T
         assert C == H * E
         # fixed-context causal self-attention
         W = self.context_size
-        k = sliding_windows(k, W)[:, :, 1::2]
-        v = sliding_windows(v, W)[:, :, 1::2]
+        k = sliding_windows(k, W)[:, :, ::2]
+        v = sliding_windows(v, W)[:, :, ::2]
         assert q.shape == (B, H, T, E)
         assert k.shape == (B, H, T, W, E)
         att = torch.einsum('bhie,bhiwe->bhiw', q, k) * (E ** -0.5)
@@ -146,8 +145,8 @@ class ShrinkCausalSelfAttention(nn.Module):
         y = self.resid_dropout(self.c_proj(y))
         return y
 
-class GrowCausalSelfAttention(nn.Module):
 
+class GrowCausalSelfAttention(nn.Module):
     def __init__(self, config, context_size):
         super().__init__()
         assert config.n_embd % config.n_head == 0
@@ -223,15 +222,22 @@ class Block(nn.Module):
         self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
         self.mlp = MLP(config)
 
-    def forward(self, x, residual):
-        if x.shape[1] > 0:
-            x = self.attn(self.ln_1(x))
-        if residual is not None:
-            if residual.shape[1] > x.shape[1]:
-                x = F.pad(x, (0, 0, residual.shape[1] - x.shape[1], 0))
-            x = residual + x
+    def forward(self, x):
+        x = add_shrinked_grown(x, self.attn(self.ln_1(x)))
         x = x + self.mlp(self.ln_2(x))
         return x
+
+def add_shrinked_grown(x: torch.Tensor, r: torch.Tensor):
+    x_len = x.shape[1]
+    r_len = r.shape[1]
+    if x_len == r_len:
+        x = x + r
+    elif x_len > r_len:
+        x = x[:, ::2] + r
+    elif x_len < r_len:
+        x = torch.repeat_interleave(x, 2, dim=1)[:, :r_len] + r
+    assert x.shape == r.shape, (x.shape, r.shape)
+    return x
 
 class FullBlock(nn.Module):
     def __init__(self, config, context_size, attention: type):
@@ -239,9 +245,9 @@ class FullBlock(nn.Module):
         self.same_size_block = Block(config, context_size=context_size)
         self.shrink_grow_block = Block(config, context_size=context_size, attention=attention)
 
-    def forward(self, x, residual):
-        x = self.same_size_block(x, x)
-        x = self.shrink_grow_block(x, residual)
+    def forward(self, x):
+        x = self.same_size_block(x)
+        x = self.shrink_grow_block(x)
         return x
 
 @dataclass
@@ -320,13 +326,10 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (1, t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        residuals = []
         for block in self.transformer.shrink:
-            residuals.append(x)
-            x = block(x, None)
+            x = block(x)
         for block in self.transformer.grow:
-            residual = residuals.pop()
-            x = block(x, residual)
+            x = block(x)
 
         x = self.transformer.ln_f(x)
 
