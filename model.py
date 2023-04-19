@@ -184,8 +184,19 @@ class GPT(nn.Module):
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (1, t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
-        for block in self.transformer.h:
+        half = len(self.transformer.h) // 2
+
+        for block in self.transformer.h[:half]:
             x = block(x)
+
+        probs = torch.linspace(0.5, -0.5, x.size()[0], device=x.device).maximum(torch.tensor(0.0, device=x.device))
+        mask = torch.rand(x.size()[:-1], device=x.device) > probs.unsqueeze(-1)
+        x = mask.unsqueeze(-1) * x
+        x = x / (1 - probs.unsqueeze(-1).unsqueeze(-1))
+
+        for block in self.transformer.h[half:]:
+            x = block(x)
+
         x = self.transformer.ln_f(x)
 
         if targets is not None:
