@@ -5,7 +5,7 @@ import os
 import pickle
 from contextlib import nullcontext
 import torch
-import tiktoken
+import lowerizer
 from model import GPTConfig, GPT
 
 # -----------------------------------------------------------------------------
@@ -69,21 +69,21 @@ if load_meta:
 else:
     # ok let's assume gpt-2 encodings by default
     print("No meta.pkl found, assuming GPT-2 encodings...")
-    enc = tiktoken.get_encoding("gpt2")
-    encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
-    decode = lambda l: enc.decode(l)
+    encode = lowerizer.encode
+    decode = lowerizer.decode
 
 # encode the beginning of the prompt
 if start.startswith('FILE:'):
     with open(start[5:], 'r', encoding='utf-8') as f:
         start = f.read()
-start_ids = encode(start)
+start_ids, start_flags = encode(start)
 x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+x_flags = (torch.tensor(start_flags, dtype=torch.bool, device=device)[None, ...]).int()
 
 # run generation
 with torch.no_grad():
     with ctx:
         for k in range(num_samples):
-            y = model.generate(x, max_new_tokens, temperature=temperature, top_k=top_k)
-            print(decode(y[0].tolist()))
+            y, y_flags = model.generate(x, x_flags, max_new_tokens, temperature=temperature, top_k=top_k)
+            print(decode(y[0].tolist(), y_flags[0].tolist()))
             print('---------------')

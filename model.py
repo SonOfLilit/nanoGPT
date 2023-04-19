@@ -132,17 +132,20 @@ class GPT(nn.Module):
 
         self.transformer = nn.ModuleDict(dict(
             wte = nn.Embedding(config.vocab_size, config.n_embd),
+            wfe = nn.Embedding(4, config.n_embd),
             wpe = nn.Embedding(config.block_size, config.n_embd),
             drop = nn.Dropout(config.dropout),
             h = nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
             ln_f = LayerNorm(config.n_embd, bias=config.bias),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_flags_head = nn.Linear(config.n_embd, 4, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
         # not 100% sure what this is, so far seems to be harmless. TODO investigate
         self.transformer.wte.weight = self.lm_head.weight # https://paperswithcode.com/method/weight-tying
+        self.transformer.wfe.weight = self.lm_flags_head.weight
 
         # init all weights
         self.apply(self._init_weights)
@@ -164,6 +167,7 @@ class GPT(nn.Module):
         n_params = sum(p.numel() for p in self.parameters())
         if non_embedding:
             n_params -= self.transformer.wpe.weight.numel()
+            n_params -= self.transformer.wfe.weight.numel()
         return n_params
 
     def _init_weights(self, module):
@@ -174,7 +178,7 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, flags, targets=None, targets_flags=None):
         device = idx.device
         b, t = idx.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
@@ -182,22 +186,28 @@ class GPT(nn.Module):
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        flags_embs = self.transformer.wfe(flags) # flags embeddings of shape (b, t, 5, n_embed)
+        flags_emb = flags_embs.sum(dim=-2) # flags embeddings of shape (b, t, n_embed)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (1, t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+        x = self.transformer.drop(tok_emb + pos_emb + flags_emb)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
 
         if targets is not None:
+            assert targets_flags is not None
             # if we are given some desired targets also calculate the loss
             logits = self.lm_head(x)
+            flags_logits = self.lm_flags_head(x)
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            loss = loss + F.binary_cross_entropy_with_logits(flags_logits.view(-1, flags_logits.size(-1)), targets_flags.to(flags_logits.dtype).view(-1, targets_flags.size(-1)))
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
+            flags_logits = self.lm_flags_head(x[:, [-1], :])
             loss = None
 
-        return logits, loss
+        return logits, flags_logits, loss
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary
@@ -303,6 +313,7 @@ class GPT(nn.Module):
         # so let's manually remove 'lm_head.weight' from decay set. This will include
         # this tensor into optimization via transformer.wte.weight only, and not decayed.
         decay.remove('lm_head.weight')
+        decay.remove('lm_flags_head.weight')
 
         # validate that we considered every parameter
         param_dict = {pn: p for pn, p in self.named_parameters()}
@@ -342,7 +353,7 @@ class GPT(nn.Module):
         return mfu
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None):
+    def generate(self, idx, flags, max_new_tokens, temperature=1.0, top_k=None):
         """
         Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
         the sequence max_new_tokens times, feeding the predictions back into the model each time.
@@ -351,19 +362,24 @@ class GPT(nn.Module):
         for _ in range(max_new_tokens):
             # if the sequence context is growing too long we must crop it at block_size
             idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size:]
+            flags_cond = flags if flags.size(1) <= self.config.block_size else flags[:, -self.config.block_size:]
             # forward the model to get the logits for the index in the sequence
-            logits, _ = self(idx_cond)
+            logits, logits_flags, _ = self(idx_cond, flags_cond)
             # pluck the logits at the final step and scale by desired temperature
             logits = logits[:, -1, :] / temperature
+            logits_flags = logits_flags[:, -1, :] / temperature
             # optionally crop the logits to only the top k options
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
             # apply softmax to convert logits to (normalized) probabilities
             probs = F.softmax(logits, dim=-1)
+            probs_flags = F.sigmoid(logits_flags)
             # sample from the distribution
             idx_next = torch.multinomial(probs, num_samples=1)
+            flags_next = torch.rand_like(probs_flags) > probs_flags
             # append sampled index to the running sequence and continue
             idx = torch.cat((idx, idx_next), dim=1)
+            flags = torch.cat((flags, flags_next.unsqueeze(0)), dim=1)
 
-        return idx
+        return idx, flags

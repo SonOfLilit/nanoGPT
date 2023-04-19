@@ -113,17 +113,25 @@ ctx = nullcontext() if device_type == 'cpu' else torch.amp.autocast(device_type=
 data_dir = os.path.join('data', dataset)
 train_data = np.memmap(os.path.join(data_dir, 'train.bin'), dtype=np.uint16, mode='r')
 val_data = np.memmap(os.path.join(data_dir, 'val.bin'), dtype=np.uint16, mode='r')
+train_flags = np.memmap(os.path.join(data_dir, 'train_flags.bin'), dtype=np.bool8, mode='r')
+val_flags = np.memmap(os.path.join(data_dir, 'val_flags.bin'), dtype=np.bool8, mode='r')
+train_flags = train_flags.reshape(-1, 4)
+val_flags = val_flags.reshape(-1, 4)
 def get_batch(split):
     data = train_data if split == 'train' else val_data
+    flags = train_flags if split == 'train' else val_flags
     ix = torch.randint(len(data) - block_size, (batch_size,))
     x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
     y = torch.stack([torch.from_numpy((data[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    x_flags = torch.stack([torch.from_numpy((flags[i:i+block_size]).astype(np.int64)) for i in ix])
+    y_flags = torch.stack([torch.from_numpy((flags[i+1:i+1+block_size]).astype(np.int64)) for i in ix])
+    results = x, x_flags, y, y_flags
     if device_type == 'cuda':
-        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
-        x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
+        # pin arrays, which allows us to move them to GPU asynchronously (non_blocking=True)
+        results = [a.pin_memory().to(device, non_blocking=True) for a in results]
     else:
-        x, y = x.to(device), y.to(device)
-    return x, y
+        results = [a.to(device) for a in results]
+    return results
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
@@ -214,9 +222,9 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            X, X_flags, Y, Y_flags = get_batch(split)
             with ctx:
-                logits, loss = model(X, Y)
+                logits, logits_flags, loss = model(X, X_flags, Y, Y_flags)
             losses[k] = loss.item()
         out[split] = losses.mean()
     model.train()
@@ -242,7 +250,7 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
-X, Y = get_batch('train') # fetch the very first batch
+X, X_flags, Y, Y_flags = get_batch('train') # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
@@ -294,10 +302,10 @@ while True:
             # looking at the source of that context manager, it just toggles this variable
             model.require_backward_grad_sync = (micro_step == gradient_accumulation_steps - 1)
         with ctx:
-            logits, loss = model(X, Y)
+            logits, logits_flags, loss = model(X, X_flags, Y, Y_flags)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        X, X_flags, Y, Y_flags = get_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient
