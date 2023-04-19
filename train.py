@@ -125,6 +125,24 @@ def get_batch(split):
         x, y = x.to(device), y.to(device)
     return x, x
 
+def get_tokenizer_batch(split):
+    SPACE_TOKEN_ID = 1  # There's an assert in shakespeare_char/prepary.py that ensures this is the case
+    data = train_data if split == 'train' else val_data
+    ix = torch.randint(len(data) - 2 * block_size, (batch_size,))
+    for i in range(batch_size):
+        d = data[ix[i]:ix[i]+block_size]
+        spaces = np.argwhere(d == SPACE_TOKEN_ID)
+        if spaces.size:
+            ix[i] += spaces[0] + 1
+    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+    if device_type == 'cuda':
+        # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
+        x = x.pin_memory().to(device, non_blocking=True)
+    else:
+        x = x.to(device)
+    return x, x
+
+
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
 best_val_loss = 1e9
@@ -214,7 +232,7 @@ def estimate_loss():
     for split in ['train', 'val']:
         losses = torch.zeros(eval_iters)
         for k in range(eval_iters):
-            X, Y = get_batch(split)
+            X, Y = get_tokenizer_batch(split)
             with ctx:
                 logits, loss = model(X, Y)
             losses[k] = loss.item()
@@ -242,7 +260,7 @@ if wandb_log and master_process:
     wandb.init(project=wandb_project, name=wandb_run_name, config=config)
 
 # training loop
-X, Y = get_batch('train') # fetch the very first batch
+X, Y = get_tokenizer_batch('train') # fetch the very first batch
 t0 = time.time()
 local_iter_num = 0 # number of iterations in the lifetime of this process
 raw_model = model.module if ddp else model # unwrap DDP container if needed
@@ -297,7 +315,7 @@ while True:
             logits, loss = model(X, Y)
             loss = loss / gradient_accumulation_steps # scale the loss to account for gradient accumulation
         # immediately async prefetch next batch while model is doing the forward pass on the GPU
-        X, Y = get_batch('train')
+        X, Y = get_tokenizer_batch('train')
         # backward pass, with gradient scaling if training in fp16
         scaler.scale(loss).backward()
     # clip the gradient

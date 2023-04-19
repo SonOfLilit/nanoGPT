@@ -22,6 +22,7 @@ print(f"length of dataset in characters: {len(data):,}")
 
 # get all the unique characters that occur in this text
 chars = sorted(list(set(data)))
+assert ' ' == chars[1]  # train.py assumes SPACE_TOKEN_ID = 1
 vocab_size = len(chars)
 print("all the unique characters:", ''.join(chars))
 print(f"vocab size: {vocab_size:,}")
