@@ -189,7 +189,7 @@ class GPT(nn.Module):
         for block in self.transformer.h[:half]:
             x = block(x)
 
-        probs = torch.linspace(0.5, -0.5, x.size()[0], device=x.device).maximum(torch.tensor(0.0, device=x.device))
+        probs = torch.linspace(0.1, 0.75, x.size()[0], device=x.device).maximum(torch.tensor(0.0, device=x.device))
         mask = torch.rand(x.size()[:-1], device=x.device) > probs.unsqueeze(-1)
         x = mask.unsqueeze(-1) * x
         x = x / (1 - probs.unsqueeze(-1).unsqueeze(-1))

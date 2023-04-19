@@ -123,25 +123,32 @@ def get_batch(split):
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
-    return x, x
+    return x, y
 
 def get_tokenizer_batch(split):
-    SPACE_TOKEN_ID = 1  # There's an assert in shakespeare_char/prepary.py that ensures this is the case
+    PAD_TOKEN_ID = 0    
+    SPACE_TOKEN_ID = 2  # There's an assert in shakespeare_char/prepary.py that ensures this is the case
     data = train_data if split == 'train' else val_data
     ix = torch.randint(len(data) - 2 * block_size, (batch_size,))
+    batch = []
     for i in range(batch_size):
         d = data[ix[i]:ix[i]+block_size]
         spaces = np.argwhere(d == SPACE_TOKEN_ID)
         if spaces.size:
             ix[i] += spaces[0] + 1
-    x = torch.stack([torch.from_numpy((data[i:i+block_size]).astype(np.int64)) for i in ix])
+        d = data[ix[i]:ix[i]+block_size].copy()
+        spaces = np.argwhere(d == SPACE_TOKEN_ID)
+        if spaces.size:
+            d[spaces[-1][0] + 1:] = PAD_TOKEN_ID
+        batch.append(d)
+    x = torch.stack([torch.from_numpy((b).astype(np.int64)) for b in batch])
     if device_type == 'cuda':
         # pin arrays x,y, which allows us to move them to GPU asynchronously (non_blocking=True)
         x = x.pin_memory().to(device, non_blocking=True)
     else:
         x = x.to(device)
     return x, x
-
+get_tokenizer_batch = get_batch
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0

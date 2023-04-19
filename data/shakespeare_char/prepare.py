@@ -21,8 +21,8 @@ with open(input_file_path, 'r') as f:
 print(f"length of dataset in characters: {len(data):,}")
 
 # get all the unique characters that occur in this text
-chars = sorted(list(set(data)))
-assert ' ' == chars[1]  # train.py assumes SPACE_TOKEN_ID = 1
+chars = ["<PAD>"] + sorted(list(set(data)))
+assert ' ' == chars[2]  # train.py assumes SPACE_TOKEN_ID = 2
 vocab_size = len(chars)
 print("all the unique characters:", ''.join(chars))
 print(f"vocab size: {vocab_size:,}")
