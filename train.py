@@ -123,7 +123,7 @@ def get_batch(split):
         x, y = x.pin_memory().to(device, non_blocking=True), y.pin_memory().to(device, non_blocking=True)
     else:
         x, y = x.to(device), y.to(device)
-    return x, y
+    return x, x
 
 # init these up here, can override if init_from='resume' (i.e. from a checkpoint)
 iter_num = 0
