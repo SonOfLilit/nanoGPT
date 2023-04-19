@@ -2,3 +2,8 @@
 .ipynb_checkpoints/
 __pycache__/
 *.pyc
+wandb/
+out*/
+*.pkl
+*.bin
+data/shakespeare_char/input.txt
